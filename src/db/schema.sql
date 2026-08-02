@@ -29,7 +29,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   browser           TEXT,
   os                TEXT,
   user_agent        TEXT,
-  ip_hash           TEXT,                   -- hashed IP, never store raw IP
+  ip_hash           TEXT,                   -- hashed IP, kept for backward-compatible dedup
+  ip                TEXT,                   -- raw IP address (see README privacy note before enabling in regulated contexts)
+  country           TEXT,                   -- ISO country code, resolved offline from IP
+  city              TEXT,                   -- best-effort, offline DB has limited city precision
+  search_engine     TEXT,                   -- google / bing / duckduckgo / yahoo / yandex / baidu (from referrer, if organic)
+  search_keywords   TEXT,                   -- query the visitor typed in the search engine, when the engine still passes it
+  traffic_source_type TEXT NOT NULL DEFAULT 'direct', -- direct | referral | organic_search | ai_referral | ai_crawler | search_bot
+  bot_name          TEXT,                   -- e.g. GPTBot, ClaudeBot, PerplexityBot, or AI referral product name (chatgpt, perplexity...)
   started_at        TIMESTAMPTZ NOT NULL,
   last_seen_at      TIMESTAMPTZ NOT NULL,
   ended_at          TIMESTAMPTZ,
@@ -39,9 +46,20 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Idempotent upgrades for deployments created before these columns existed.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ip TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS country TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS city TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS search_engine TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS search_keywords TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS traffic_source_type TEXT NOT NULL DEFAULT 'direct';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bot_name TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_sessions_site_started ON sessions (site_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_visitor ON sessions (visitor_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_unfinished ON sessions (is_finished, last_seen_at) WHERE is_finished = false;
+CREATE INDEX IF NOT EXISTS idx_sessions_traffic_type ON sessions (site_id, traffic_source_type, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_country ON sessions (site_id, country);
 
 -- One row per page viewed inside a session (the "path" the user followed = order these by nav_index)
 CREATE TABLE IF NOT EXISTS pageviews (
@@ -87,3 +105,36 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_site_time ON events (site_id, occurred_at DESC);
+
+-- Raw hits reported by the optional server-side middleware (src/server-agent.js).
+-- This is how we catch crawlers that never execute JavaScript (GPTBot, CCBot,
+-- ClaudeBot, etc.) -- they will never trigger the browser tracker.js beacon.
+CREATE TABLE IF NOT EXISTS bot_visits (
+  id            BIGSERIAL PRIMARY KEY,
+  site_id       TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  bot_name      TEXT NOT NULL,
+  traffic_source_type TEXT NOT NULL DEFAULT 'ai_crawler', -- ai_crawler | search_bot
+  url           TEXT,
+  path          TEXT,
+  referrer      TEXT,
+  user_agent    TEXT,
+  ip            TEXT,
+  country       TEXT,
+  city          TEXT,
+  occurred_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_visits_site_time ON bot_visits (site_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bot_visits_bot_name ON bot_visits (site_id, bot_name, occurred_at DESC);
+
+-- Optional monthly goal for AI-crawler visibility, e.g. "get at least 500
+-- AI-crawler hits this month" -- the more legitimate AI crawlers visit and
+-- read your content, the more likely your site is to be cited/used by
+-- answer engines (ChatGPT, Perplexity, Gemini, etc).
+CREATE TABLE IF NOT EXISTS ai_visibility_goals (
+  site_id       TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  month         TEXT NOT NULL, -- 'YYYY-MM'
+  target_visits INTEGER NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (site_id, month)
+);

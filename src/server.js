@@ -14,6 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.disable('x-powered-by');
+app.set('trust proxy', true); // required so req.ip is the real visitor IP behind Railway's proxy
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(corsMiddleware);
 

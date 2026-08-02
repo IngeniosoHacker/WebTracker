@@ -10,7 +10,9 @@ router.get('/sites/:siteId/sessions', async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id, visitor_id, landing_page, referrer, referrer_domain,
             utm_source, utm_medium, utm_campaign, utm_term, utm_content,
-            device_type, browser, os, started_at, ended_at, duration_ms,
+            device_type, browser, os, ip, country, city,
+            search_engine, search_keywords, traffic_source_type, bot_name,
+            started_at, ended_at, duration_ms,
             pageview_count, is_finished
      FROM sessions WHERE site_id = $1
      ORDER BY started_at DESC LIMIT $2 OFFSET $3`,
@@ -103,6 +105,143 @@ router.get('/pageviews/:pageviewId/content', async (req, res) => {
   );
   if (!rows.length) return res.status(404).json({ error: 'not found' });
   res.json(rows[0]);
+});
+
+// GET /api/sites/:siteId/geo -> sessions grouped by country/city
+router.get('/sites/:siteId/geo', async (req, res) => {
+  const { siteId } = req.params;
+  const { rows } = await pool.query(
+    `SELECT COALESCE(country, 'unknown') AS country, COALESCE(city, 'unknown') AS city, COUNT(*) AS sessions
+     FROM sessions WHERE site_id = $1
+     GROUP BY 1,2 ORDER BY sessions DESC LIMIT 50`,
+    [siteId]
+  );
+  res.json({ geo: rows });
+});
+
+// GET /api/sites/:siteId/search-keywords -> top keywords that brought visitors in from organic search
+// Note: most modern search engines (Google, Bing, DuckDuckGo) no longer pass the
+// query in the referrer for regular organic results ("(not provided)"), so this
+// will mostly be populated by engines/contexts that still do, or by paid clicks
+// where utm_term was set. It's included for completeness and future-proofing.
+router.get('/sites/:siteId/search-keywords', async (req, res) => {
+  const { siteId } = req.params;
+  const { rows } = await pool.query(
+    `SELECT COALESCE(search_engine, 'unknown') AS search_engine,
+            COALESCE(search_keywords, utm_term, '(not provided)') AS keywords,
+            COUNT(*) AS sessions
+     FROM sessions
+     WHERE site_id = $1 AND traffic_source_type = 'organic_search'
+     GROUP BY 1,2 ORDER BY sessions DESC LIMIT 50`,
+    [siteId]
+  );
+  res.json({ keywords: rows });
+});
+
+// GET /api/sites/:siteId/ai-visibility?month=YYYY-MM
+// The core "is AI reading my site" dashboard: AI crawler hits (bots that never
+// run JS, reported via /collect/server) + ai_crawler sessions (agentic browsers
+// that DO run JS) + ai_referral sessions (real humans arriving from an AI chat
+// product), broken down by bot/product, plus progress against a monthly goal.
+router.get('/sites/:siteId/ai-visibility', async (req, res) => {
+  const { siteId } = req.params;
+  const month = req.query.month || new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+  const monthStart = `${month}-01`;
+
+  const [crawlerHits, crawlerSessions, referralSessions, goal, dailyTrend] = await Promise.all([
+    pool.query(
+      `SELECT bot_name, COUNT(*) AS hits
+       FROM bot_visits
+       WHERE site_id = $1 AND occurred_at >= $2::date AND occurred_at < ($2::date + interval '1 month')
+       GROUP BY bot_name ORDER BY hits DESC`,
+      [siteId, monthStart]
+    ),
+    pool.query(
+      `SELECT bot_name, COUNT(*) AS hits
+       FROM sessions
+       WHERE site_id = $1 AND traffic_source_type = 'ai_crawler'
+         AND started_at >= $2::date AND started_at < ($2::date + interval '1 month')
+       GROUP BY bot_name ORDER BY hits DESC`,
+      [siteId, monthStart]
+    ),
+    pool.query(
+      `SELECT bot_name AS ai_product, COUNT(*) AS sessions
+       FROM sessions
+       WHERE site_id = $1 AND traffic_source_type = 'ai_referral'
+         AND started_at >= $2::date AND started_at < ($2::date + interval '1 month')
+       GROUP BY bot_name ORDER BY sessions DESC`,
+      [siteId, monthStart]
+    ),
+    pool.query(`SELECT target_visits FROM ai_visibility_goals WHERE site_id = $1 AND month = $2`, [siteId, month]),
+    pool.query(
+      `SELECT day::date AS day, COUNT(*) AS hits FROM (
+         SELECT occurred_at AS day FROM bot_visits
+           WHERE site_id = $1 AND occurred_at >= $2::date AND occurred_at < ($2::date + interval '1 month')
+         UNION ALL
+         SELECT started_at AS day FROM sessions
+           WHERE site_id = $1 AND traffic_source_type = 'ai_crawler'
+             AND started_at >= $2::date AND started_at < ($2::date + interval '1 month')
+       ) t GROUP BY 1 ORDER BY 1`,
+      [siteId, monthStart]
+    )
+  ]);
+
+  const totalCrawlerHits = crawlerHits.rows.reduce((sum, r) => sum + Number(r.hits), 0)
+    + crawlerSessions.rows.reduce((sum, r) => sum + Number(r.hits), 0);
+  const totalReferralSessions = referralSessions.rows.reduce((sum, r) => sum + Number(r.sessions), 0);
+  const target = goal.rows[0] ? goal.rows[0].target_visits : null;
+
+  res.json({
+    month,
+    aiCrawlerHits: {
+      total: totalCrawlerHits,
+      byBot: mergeBotCounts(crawlerHits.rows, crawlerSessions.rows)
+    },
+    aiReferralTraffic: {
+      total: totalReferralSessions,
+      byProduct: referralSessions.rows
+    },
+    dailyTrend: dailyTrend.rows,
+    goal: target
+      ? { targetVisits: target, achieved: totalCrawlerHits, progressPercent: Math.round((totalCrawlerHits / target) * 100) }
+      : null
+  });
+});
+
+function mergeBotCounts(a, b) {
+  const map = new Map();
+  for (const r of [...a, ...b]) {
+    const key = r.bot_name || 'unknown';
+    map.set(key, (map.get(key) || 0) + Number(r.hits));
+  }
+  return Array.from(map.entries()).map(([botName, hits]) => ({ botName, hits })).sort((x, y) => y.hits - x.hits);
+}
+
+// GET /api/sites/:siteId/ai-goal?month=YYYY-MM -> read the configured monthly goal
+router.get('/sites/:siteId/ai-goal', async (req, res) => {
+  const { siteId } = req.params;
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const { rows } = await pool.query(
+    `SELECT month, target_visits FROM ai_visibility_goals WHERE site_id = $1 AND month = $2`,
+    [siteId, month]
+  );
+  res.json(rows[0] || { month, target_visits: null });
+});
+
+// POST /api/sites/:siteId/ai-goal  { month: 'YYYY-MM', targetVisits: 500 }
+router.post('/sites/:siteId/ai-goal', express.json(), async (req, res) => {
+  const { siteId } = req.params;
+  const { month, targetVisits } = req.body || {};
+  if (!month || !Number.isFinite(targetVisits)) {
+    return res.status(400).json({ error: 'month (YYYY-MM) and targetVisits (number) are required' });
+  }
+  await pool.query(
+    `INSERT INTO ai_visibility_goals (site_id, month, target_visits)
+     VALUES ($1,$2,$3)
+     ON CONFLICT (site_id, month) DO UPDATE SET target_visits = EXCLUDED.target_visits`,
+    [siteId, month, targetVisits]
+  );
+  res.status(204).end();
 });
 
 module.exports = router;

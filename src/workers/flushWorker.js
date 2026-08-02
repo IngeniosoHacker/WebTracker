@@ -31,18 +31,30 @@ async function upsertSessionStart(client, beacon) {
     `INSERT INTO sessions (
        id, site_id, visitor_id, landing_page, landing_path, referrer, referrer_domain,
        utm_source, utm_medium, utm_campaign, utm_term, utm_content,
-       device_type, browser, os, user_agent, ip_hash,
+       device_type, browser, os, user_agent, ip_hash, ip, country, city,
+       search_engine, search_keywords, traffic_source_type, bot_name,
        started_at, last_seen_at, pageview_count
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-       to_timestamp($18::double precision / 1000), to_timestamp($19::double precision / 1000), 0
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+       $21,$22,$23,$24,
+       to_timestamp($25::double precision / 1000), to_timestamp($26::double precision / 1000), 0
      )
-     ON CONFLICT (id) DO UPDATE SET last_seen_at = GREATEST(sessions.last_seen_at, EXCLUDED.last_seen_at)`,
+     ON CONFLICT (id) DO UPDATE SET
+       last_seen_at = GREATEST(sessions.last_seen_at, EXCLUDED.last_seen_at),
+       ip = COALESCE(sessions.ip, EXCLUDED.ip),
+       country = COALESCE(sessions.country, EXCLUDED.country),
+       city = COALESCE(sessions.city, EXCLUDED.city),
+       search_engine = COALESCE(sessions.search_engine, EXCLUDED.search_engine),
+       search_keywords = COALESCE(sessions.search_keywords, EXCLUDED.search_keywords),
+       bot_name = COALESCE(sessions.bot_name, EXCLUDED.bot_name)`,
     [
       beacon.sessionId, beacon.siteId, beacon.visitorId,
       l.page || null, l.path || null, l.referrer || null, l.referrer ? domainFromUrl(l.referrer) : null,
       utm.source || null, utm.medium || null, utm.campaign || null, utm.term || null, utm.content || null,
       l.deviceType || null, l.browser || null, l.os || null, beacon.userAgent || null, beacon.ipHash || null,
+      beacon.ip || null, beacon.country || null, beacon.city || null,
+      beacon.searchEngine || null, beacon.searchKeywords || null,
+      beacon.trafficSourceType || 'direct', beacon.botName || null,
       beacon.enteredAt || beacon.receivedAt, beacon.receivedAt
     ]
   );
@@ -56,11 +68,28 @@ async function upsertPageview(client, beacon) {
   const text = content.text ? String(content.text).slice(0, CONTENT_MAX_CHARS) : null;
 
   // Make sure the parent session exists even if session_start was lost/delayed, so FK doesn't fail.
+  // Also fills in geo/traffic-classification fields if session_start hasn't arrived yet.
   await client.query(
-    `INSERT INTO sessions (id, site_id, visitor_id, started_at, last_seen_at, pageview_count)
-     VALUES ($1,$2,$3, to_timestamp($4::double precision/1000), to_timestamp($4::double precision/1000), 0)
-     ON CONFLICT (id) DO NOTHING`,
-    [beacon.sessionId, beacon.siteId, beacon.visitorId, pv.enteredAt || beacon.receivedAt]
+    `INSERT INTO sessions (
+       id, site_id, visitor_id, ip, country, city, search_engine, search_keywords,
+       traffic_source_type, bot_name, user_agent, started_at, last_seen_at, pageview_count
+     )
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+             to_timestamp($12::double precision/1000), to_timestamp($12::double precision/1000), 0)
+     ON CONFLICT (id) DO UPDATE SET
+       ip = COALESCE(sessions.ip, EXCLUDED.ip),
+       country = COALESCE(sessions.country, EXCLUDED.country),
+       city = COALESCE(sessions.city, EXCLUDED.city),
+       search_engine = COALESCE(sessions.search_engine, EXCLUDED.search_engine),
+       search_keywords = COALESCE(sessions.search_keywords, EXCLUDED.search_keywords),
+       bot_name = COALESCE(sessions.bot_name, EXCLUDED.bot_name)`,
+    [
+      beacon.sessionId, beacon.siteId, beacon.visitorId,
+      beacon.ip || null, beacon.country || null, beacon.city || null,
+      beacon.searchEngine || null, beacon.searchKeywords || null,
+      beacon.trafficSourceType || 'direct', beacon.botName || null, beacon.userAgent || null,
+      pv.enteredAt || beacon.receivedAt
+    ]
   );
 
   const result = await client.query(
@@ -131,6 +160,19 @@ async function upsertEvent(client, beacon) {
   );
 }
 
+async function upsertBotHit(client, beacon) {
+  await client.query(
+    `INSERT INTO bot_visits (
+       site_id, bot_name, traffic_source_type, url, path, referrer, user_agent, ip, country, city, occurred_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, to_timestamp($11::double precision/1000))`,
+    [
+      beacon.siteId, beacon.botName, beacon.trafficSourceType, beacon.url || null, beacon.path || null,
+      beacon.referrer || null, beacon.userAgent || null, beacon.ip || null, beacon.country || null,
+      beacon.city || null, beacon.receivedAt
+    ]
+  );
+}
+
 async function processBeacon(client, beacon) {
   switch (beacon.type) {
     case 'session_start':
@@ -139,6 +181,8 @@ async function processBeacon(client, beacon) {
       return upsertPageview(client, beacon);
     case 'event':
       return upsertEvent(client, beacon);
+    case 'bot_hit':
+      return upsertBotHit(client, beacon);
     default:
       return null;
   }
