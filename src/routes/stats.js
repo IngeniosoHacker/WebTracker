@@ -174,10 +174,11 @@ router.get('/sites/:siteId/ai-visibility', async (req, res) => {
     ),
     pool.query(`SELECT target_visits FROM ai_visibility_goals WHERE site_id = $1 AND month = $2`, [siteId, month]),
     pool.query(
-      `SELECT day::date AS day, COUNT(*) AS hits FROM (
-         SELECT occurred_at AS day FROM bot_visits
-           WHERE site_id = $1 AND occurred_at >= $2::date AND occurred_at < ($2::date + interval '1 month')
-         UNION ALL
+  `SELECT day::date AS day, COUNT(*) AS hits FROM (
+     SELECT occurred_at AS day FROM bot_visits
+       WHERE site_id = $1 AND traffic_source_type = 'ai_crawler'
+         AND occurred_at >= $2::date AND occurred_at < ($2::date + interval '1 month')
+     UNION ALL
          SELECT started_at AS day FROM sessions
            WHERE site_id = $1 AND traffic_source_type = 'ai_crawler'
              AND started_at >= $2::date AND started_at < ($2::date + interval '1 month')
