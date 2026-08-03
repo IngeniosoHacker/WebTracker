@@ -149,13 +149,13 @@ router.get('/sites/:siteId/ai-visibility', async (req, res) => {
   const monthStart = `${month}-01`;
 
   const [crawlerHits, crawlerSessions, referralSessions, goal, dailyTrend] = await Promise.all([
-    pool.query(
-      `SELECT bot_name, COUNT(*) AS hits
-       FROM bot_visits
-       WHERE site_id = $1 AND occurred_at >= $2::date AND occurred_at < ($2::date + interval '1 month')
-       GROUP BY bot_name ORDER BY hits DESC`,
-      [siteId, monthStart]
-    ),
+   pool.query(
+  `SELECT bot_name, COUNT(*) AS hits FROM bot_visits
+   WHERE site_id = $1 AND traffic_source_type = 'ai_crawler'
+     AND occurred_at >= $2::date AND occurred_at < ($2::date + interval '1 month')
+   GROUP BY bot_name ORDER BY hits DESC`,
+  [siteId, monthStart]
+),
     pool.query(
       `SELECT bot_name, COUNT(*) AS hits
        FROM sessions
