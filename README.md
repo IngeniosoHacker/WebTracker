@@ -336,11 +336,45 @@ from this same service (`GET /tracker.js`).
 | `events` | Free-form custom events (clicks, conversions, etc.) |
 | `bot_visits` | Raw hits from AI/search crawlers reported by `server-agent.js` (bots that never run JS) |
 | `ai_visibility_goals` | Optional monthly target for AI-crawler hits per site |
+| `seo_settings` | Per site: domain to research, DataForSEO market (location/language), rank-check device, competitors, monthly SEO data budget |
+| `seo_keywords` | Keywords a site follows (rank tracking), with where each came from |
+| `seo_keyword_metrics` | Search volume, CPC, difficulty, intent per keyword and market |
+| `seo_rank_checks` | Every Google position check (history for charts and the R trend models) |
+| `seo_api_cache` / `seo_api_usage` | Cached DataForSEO responses and every paid call's cost (per-site budget) |
+
+`pageviews.seo_meta` holds the on-page SEO signals `tracker.js` reads from the
+rendered DOM (meta description, h1, canonical, lang, robots, schema.org types,
+images without `alt`, internal/external links). Only whitelisted keys are
+stored, strings capped (`seoMeta()` in `flushWorker.js`).
 
 See [`src/db/schema.sql`](src/db/schema.sql) for the full DDL — it's applied
 automatically on deploy (see below).
 
 ---
+
+## 8b. SEO: rank tracking (DataForSEO)
+
+The SEO feature set (keyword research, rank tracking, competitors, keyword
+gap, backlinks, site audit) is ported from
+[OpenSEO](https://github.com/every-app/open-seo) (MIT) onto this database;
+the screens live in `andrho-tracker-dashboard` (Web > Keywords, Posiciones,
+Competencia, Auditoría). This service owns the schema and the one scheduled
+job: `src/workers/rankWorker.js` checks the Google position of every tracked
+keyword once a day (a keyword added in the dashboard gets its first check
+within `RANK_INTERVAL_MS`) via `src/lib/dataforseo.js` — the same client file
+the dashboard ships; keep both copies in sync.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DATAFORSEO_API_KEY` | — | The "Base64" credentials from DataForSEO's API Access page. Without it rank tracking is off. (`DATAFORSEO_LOGIN` + `DATAFORSEO_PASSWORD` also work.) |
+| `DATAFORSEO_BASE_URL` | `https://api.dataforseo.com` | `https://sandbox.dataforseo.com` for free fake data in development. |
+| `RANK_INTERVAL_MS` | `900000` | How often the worker looks for due keywords. |
+| `RANK_CHECK_EVERY_HOURS` | `24` | Hours between two checks of the same keyword. |
+| `RANK_BATCH_SIZE` | `50` | Max checks per run. |
+
+Each check is one SERP call (~US$0.002) and counts against the site's
+`seo_settings.monthly_budget_usd` (default US$5): once a site reaches it,
+its checks pause until next month.
 
 ## 9. Querying the data
 

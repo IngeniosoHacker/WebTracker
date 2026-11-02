@@ -9,6 +9,7 @@ const collectRoutes = require('./routes/collect');
 const statsRoutes = require('./routes/stats');
 const flushWorker = require('./workers/flushWorker');
 const sessionSweeper = require('./workers/sessionSweeper');
+const rankWorker = require('./workers/rankWorker');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -46,4 +47,5 @@ app.listen(PORT, () => {
   console.log(`[server] listening on port ${PORT}`);
   flushWorker.start();
   sessionSweeper.start();
+  rankWorker.start();
 });

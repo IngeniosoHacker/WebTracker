@@ -138,3 +138,86 @@ CREATE TABLE IF NOT EXISTS ai_visibility_goals (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (site_id, month)
 );
+
+-- ---------------------------------------------------------------------------
+-- SEO (keyword research, rank tracking, competitors). Feature set ported from
+-- OpenSEO (github.com/every-app/open-seo, MIT) onto this database: the data
+-- comes from DataForSEO, the dashboard (andrho-tracker-dashboard) reads and
+-- writes these tables, and src/workers/rankWorker.js checks positions.
+-- ---------------------------------------------------------------------------
+
+-- On-page SEO signals the tracker reads from the DOM on every pageview
+-- (meta description, h1, canonical, lang, schema.org types, images without
+-- alt, link counts). See extractSeo() in public/tracker.js.
+ALTER TABLE pageviews ADD COLUMN IF NOT EXISTS seo_meta JSONB;
+
+-- One row per site: what domain to research and in which market.
+CREATE TABLE IF NOT EXISTS seo_settings (
+  site_id        TEXT PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE,
+  domain         TEXT NOT NULL,                 -- bare hostname, e.g. "acme.com.gt"
+  location_code  INTEGER NOT NULL DEFAULT 2320, -- DataForSEO location (2320 = Guatemala)
+  language_code  TEXT NOT NULL DEFAULT 'es',
+  device         TEXT NOT NULL DEFAULT 'mobile', -- rank checks: mobile | desktop
+  competitors    TEXT[] NOT NULL DEFAULT '{}',   -- competitor domains chosen by the client
+  monthly_budget_usd NUMERIC(8,2) NOT NULL DEFAULT 5, -- DataForSEO spend cap for this site
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Keywords the site follows (rank tracking) and where each came from.
+CREATE TABLE IF NOT EXISTS seo_keywords (
+  id            BIGSERIAL PRIMARY KEY,
+  site_id       TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  keyword       TEXT NOT NULL,                  -- normalized: trimmed, lower-case
+  source        TEXT NOT NULL DEFAULT 'manual', -- manual | sugerida | posicionada | rastreador
+  target_path   TEXT,                           -- page meant to rank for it, if known
+  tracked       BOOLEAN NOT NULL DEFAULT true,  -- false = saved but no daily rank check
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (site_id, keyword)
+);
+
+-- Search metrics per keyword and market (shared across sites: it's public data).
+CREATE TABLE IF NOT EXISTS seo_keyword_metrics (
+  keyword        TEXT NOT NULL,
+  location_code  INTEGER NOT NULL,
+  language_code  TEXT NOT NULL,
+  search_volume  INTEGER,
+  cpc            NUMERIC(10,2),
+  competition    NUMERIC(5,4),     -- 0-1 paid competition
+  difficulty     INTEGER,          -- 0-100 keyword difficulty
+  intent         TEXT,             -- informational | commercial | transactional | navigational
+  monthly_searches JSONB,          -- [{year, month, search_volume}]
+  fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (keyword, location_code, language_code)
+);
+
+-- One row per rank check (history => trend charts and the R models).
+CREATE TABLE IF NOT EXISTS seo_rank_checks (
+  id            BIGSERIAL PRIMARY KEY,
+  site_id       TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  keyword       TEXT NOT NULL,
+  device        TEXT NOT NULL,
+  position      INTEGER,           -- organic position (rank_group); NULL = not in the top `depth`
+  url           TEXT,              -- the site's URL that ranked
+  serp_features TEXT[] NOT NULL DEFAULT '{}',
+  error         TEXT,
+  checked_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_seo_rank_checks_kw ON seo_rank_checks (site_id, keyword, checked_at DESC);
+
+-- Cache of DataForSEO responses (keyword ideas, competitors, backlinks...),
+-- so reopening a tab doesn't pay again. Keyed by endpoint + request body.
+CREATE TABLE IF NOT EXISTS seo_api_cache (
+  cache_key     TEXT PRIMARY KEY,
+  payload       JSONB NOT NULL,
+  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Every paid DataForSEO call, for the per-site monthly budget.
+CREATE TABLE IF NOT EXISTS seo_api_usage (
+  id            BIGSERIAL PRIMARY KEY,
+  site_id       TEXT REFERENCES sites(id) ON DELETE CASCADE,
+  endpoint      TEXT NOT NULL,
+  cost_usd      NUMERIC(10,5) NOT NULL DEFAULT 0,
+  occurred_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_seo_api_usage_site ON seo_api_usage (site_id, occurred_at DESC);

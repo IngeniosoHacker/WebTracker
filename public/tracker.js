@@ -272,6 +272,53 @@
     });
   }
 
+  // On-page SEO signals, read the way a crawler would see the rendered DOM:
+  // the dashboard's SEO audit uses them per page (no re-crawl needed).
+  function extractSeo() {
+    try {
+      var q = function (sel) { return document.querySelector(sel); };
+      var attr = function (sel, a) { var el = q(sel); return el ? (el.getAttribute(a) || '') : null; };
+      var h1s = document.querySelectorAll('h1');
+      var imgs = document.querySelectorAll('img');
+      var noAlt = 0;
+      for (var i = 0; i < imgs.length; i++) if (!imgs[i].getAttribute('alt')) noAlt++;
+      var links = document.querySelectorAll('a[href]');
+      var internal = 0, external = 0;
+      for (var j = 0; j < links.length; j++) {
+        var h = links[j].hostname;
+        if (!h) continue;
+        if (h === location.hostname) internal++; else external++;
+      }
+      var types = [];
+      var ld = document.querySelectorAll('script[type="application/ld+json"]');
+      for (var k = 0; k < ld.length && types.length < 20; k++) {
+        try {
+          var data = JSON.parse(ld[k].textContent);
+          var list = Array.isArray(data) ? data : (data['@graph'] || [data]);
+          for (var m = 0; m < list.length; m++) if (list[m] && list[m]['@type']) types.push(String(list[m]['@type']));
+        } catch (e) {}
+      }
+      return {
+        titleLength: (document.title || '').length,
+        metaDescription: attr('meta[name="description"]', 'content'),
+        h1: h1s.length ? (h1s[0].textContent || '').replace(/\s+/g, ' ').trim() : null,
+        h1Count: h1s.length,
+        h2Count: document.querySelectorAll('h2').length,
+        canonical: attr('link[rel="canonical"]', 'href'),
+        lang: document.documentElement.getAttribute('lang'),
+        robots: attr('meta[name="robots"]', 'content'),
+        ogTitle: attr('meta[property="og:title"]', 'content'),
+        imgCount: imgs.length,
+        imgNoAlt: noAlt,
+        internalLinks: internal,
+        externalLinks: external,
+        schemaTypes: types
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
   function buildPageviewBeacon(isFinal) {
     var snap = activePageTracker ? activePageTracker.snapshot() : { durationMs: 0, maxScrollPercent: 0, scrollSegments: [] };
     return {
@@ -289,7 +336,8 @@
         durationMs: snap.durationMs,
         maxScrollPercent: snap.maxScrollPercent,
         scrollSegments: snap.scrollSegments,
-        content: extractContent()
+        content: extractContent(),
+        seo: extractSeo()
       }
     };
   }

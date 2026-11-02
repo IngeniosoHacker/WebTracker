@@ -60,6 +60,24 @@ async function upsertSessionStart(client, beacon) {
   );
 }
 
+// On-page SEO signals from tracker.js (extractSeo): whitelisted keys only,
+// strings capped, since anyone can post to /collect.
+const SEO_STRINGS = { metaDescription: 400, h1: 300, canonical: 500, lang: 20, robots: 100, ogTitle: 300 };
+const SEO_NUMBERS = ['h1Count', 'h2Count', 'imgCount', 'imgNoAlt', 'internalLinks', 'externalLinks', 'titleLength'];
+function seoMeta(seo) {
+  if (!seo || typeof seo !== 'object') return null;
+  const out = {};
+  for (const [k, max] of Object.entries(SEO_STRINGS)) {
+    if (typeof seo[k] === 'string') out[k] = seo[k].slice(0, max);
+  }
+  for (const k of SEO_NUMBERS) {
+    const n = Number(seo[k]);
+    if (Number.isFinite(n) && n >= 0) out[k] = Math.min(Math.round(n), 100000);
+  }
+  if (Array.isArray(seo.schemaTypes)) out.schemaTypes = seo.schemaTypes.filter((t) => typeof t === 'string').slice(0, 20).map((t) => t.slice(0, 60));
+  return Object.keys(out).length ? JSON.stringify(out) : null;
+}
+
 async function upsertPageview(client, beacon) {
   const pv = beacon.pageview;
   if (!pv || !pv.id) return;
@@ -95,12 +113,12 @@ async function upsertPageview(client, beacon) {
   const result = await client.query(
     `INSERT INTO pageviews (
        id, session_id, site_id, nav_index, url, path, title, internal_referrer_path,
-       entered_at, left_at, duration_ms, max_scroll_percent, content_text, content_word_count
+       entered_at, left_at, duration_ms, max_scroll_percent, content_text, content_word_count, seo_meta
      ) VALUES (
        $1,$2,$3,$4,$5,$6,$7,$8,
        to_timestamp($9::double precision/1000),
        CASE WHEN $10::double precision IS NULL THEN NULL ELSE to_timestamp($10::double precision/1000) END,
-       $11,$12,$13,$14
+       $11,$12,$13,$14,$15
      )
      ON CONFLICT (id) DO UPDATE SET
        left_at = COALESCE(EXCLUDED.left_at, pageviews.left_at),
@@ -108,12 +126,13 @@ async function upsertPageview(client, beacon) {
        max_scroll_percent = GREATEST(pageviews.max_scroll_percent, EXCLUDED.max_scroll_percent),
        content_text = COALESCE(pageviews.content_text, EXCLUDED.content_text),
        content_word_count = COALESCE(pageviews.content_word_count, EXCLUDED.content_word_count),
+       seo_meta = COALESCE(pageviews.seo_meta, EXCLUDED.seo_meta),
        updated_at = now()
      RETURNING (xmax = 0) AS inserted`,
     [
       pv.id, beacon.sessionId, beacon.siteId, pv.navIndex || 0, pv.url, pv.path, pv.title || null,
       pv.internalReferrerPath || null, pv.enteredAt || beacon.receivedAt, pv.leftAt || null,
-      pv.durationMs || 0, pv.maxScrollPercent || 0, text, content.wordCount || null
+      pv.durationMs || 0, pv.maxScrollPercent || 0, text, content.wordCount || null, seoMeta(pv.seo)
     ]
   );
 
